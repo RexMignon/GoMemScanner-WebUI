@@ -9,7 +9,6 @@
 ## 🖼️ Preview
 
 ![GoMemScanner-WebUI Interface](202501230610.png)
-*Memory Scanner Interface with Real-time Value Monitoring*
 
 ## ✨ Features
 
