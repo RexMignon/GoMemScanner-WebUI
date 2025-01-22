@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Memory Scanner</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .container { padding-top: 2rem; }
+        .search-results {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .spinner-border {
+            width: 1rem;
+            height: 1rem;
+            margin-right: 0.5rem;
+        }
+        .btn:disabled {
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="mb-4">Memory Scanner</h1>
+        
+        <!-- Process Selection -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Select Process</h5>
+            </div>
+            <div class="card-body">
+                <select id="processSelect" class="form-select"></select>
+                <button id="refreshProcesses" class="btn btn-secondary mt-2">
+                    <span class="spinner-border d-none" role="status"></span>
+                    <span class="btn-text">Refresh Process List</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Search Controls -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Memory Search</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-3">
+                        <select id="dataType" class="form-select">
+                            <option value="int32">Integer (32-bit)</option>
+                            <option value="int64">Integer (64-bit)</option>
+                            <option value="float32">Float (32-bit)</option>
+                            <option value="float64">Float (64-bit)</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <select id="operation" class="form-select">
+                            <option value="equal">Equal to</option>
+                            <option value="greater">Greater than</option>
+                            <option value="less">Less than</option>
+                            <option value="increased">Increased</option>
+                            <option value="decreased">Decreased</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <input type="text" id="searchValue" class="form-control" placeholder="Search value">
+                    </div>
+                    <div class="col-md-2">
+                        <button id="searchBtn" class="btn btn-primary w-100">
+                            <span class="spinner-border d-none" role="status"></span>
+                            <span class="btn-text">Search</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Search Results -->
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">Search Results</h5>
+                <div>
+                    <button id="rescanBtn" class="btn btn-info" disabled>
+                        <span class="spinner-border d-none" role="status"></span>
+                        <span class="btn-text">Rescan</span>
+                    </button>
+                    <div class="form-check form-switch d-inline-block ms-2">
+                        <input class="form-check-input" type="checkbox" id="autoUpdateSwitch">
+                        <label class="form-check-label" for="autoUpdateSwitch">Auto Update Values</label>
+                    </div>
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="search-results">
+                    <table class="table table-striped">
+                        <thead>
+                            <tr>
+                                <th>Address</th>
+                                <th>Current Value</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="resultsTable"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // API base path
+        const API_BASE = '/api';
+        let lastResults = []; // Store last search results
+        let autoUpdateTimer = null; // Auto update timer
+        let isSearching = false; // Search status flag
+
+        // Set button loading state
+        function setButtonLoading(button, loading) {
+            if (!button) return;
+            const spinner = button.querySelector('.spinner-border');
+            const text = button.querySelector('.btn-text');
+            if (loading) {
+                if (spinner) spinner.classList.remove('d-none');
+                button.disabled = true;
+            } else {
+                if (spinner) spinner.classList.add('d-none');
+                button.disabled = false;
+            }
+        }
+
+        // Get process list
+        async function getProcesses() {
+            const button = document.getElementById('refreshProcesses');
+            try {
+                setButtonLoading(button, true);
+
+                const response = await fetch(`${API_BASE}/processes`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const processes = await response.json();
+                
+                // Sort by PID in descending order
+                processes.sort((a, b) => b.pid - a.pid);
+                
+                const select = document.getElementById('processSelect');
+                select.innerHTML = processes.map(p => 
+                    `<option value="${p.pid}">${p.name} (PID: ${p.pid})</option>`
+                ).join('');
+            } catch (error) {
+                console.error('Failed to get process list:', error);
+                alert('Failed to get process list: ' + error.message);
+            } finally {
+                setButtonLoading(button, false);
+            }
+        }
+
+        // Perform memory search
+        async function searchMemory(useLastResults = false) {
+            if (isSearching) return;
+            
+            const searchBtn = document.getElementById('searchBtn');
+            const rescanBtn = document.getElementById('rescanBtn');
+            const button = useLastResults ? rescanBtn : searchBtn;
+
+            try {
+                isSearching = true;
+                setButtonLoading(button, true);
+
+                const pid = parseInt(document.getElementById('processSelect').value);
+                const value = document.getElementById('searchValue').value;
+                const dataType = document.getElementById('dataType').value;
+                const operation = document.getElementById('operation').value;
+
+                if (!pid) {
+                    alert('Please select a process first');
+                    return;
+                }
+
+                if (!value && !useLastResults) {
+                    alert('Please enter a search value');
+                    return;
+                }
+
+                const numValue = parseFloat(value);
+                if (isNaN(numValue) && !useLastResults) {
+                    alert('Please enter a valid number');
+                    return;
+                }
+
+                const response = await fetch(`${API_BASE}/search`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        pid: pid,
+                        value: numValue,
+                        dataType: dataType,
+                        operation: operation,
+                        previousResults: useLastResults ? lastResults : null
+                    })
+                });
+
+                if (!response.ok) {
+                    const error = await response.text();
+                    throw new Error(error);
+                }
+
+                const results = await response.json();
+                if (!useLastResults) {
+                    lastResults = results; // Only update lastResults for new searches
+                }
+                displayResults(results);
+                document.getElementById('rescanBtn').disabled = false;
+            } catch (error) {
+                console.error('Search failed:', error);
+                alert('Search failed: ' + error.message);
+            } finally {
+                isSearching = false;
+                setButtonLoading(searchBtn, false);
+                setButtonLoading(rescanBtn, false);
+            }
+        }
+
+        // Display search results
+        function displayResults(results, updateValuesOnly = false) {
+            const tbody = document.getElementById('resultsTable');
+            if (!updateValuesOnly) {
+                if (!Array.isArray(results) || results.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="3" class="text-center">No results found</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = results.map(result => `
+                    <tr data-address="${result.address}">
+                        <td>${result.address}</td>
+                        <td class="value-cell">${result.value}</td>
+                        <td>
+                            <input type="text" class="form-control form-control-sm d-inline-block w-50" placeholder="New value">
+                            <button class="btn btn-sm btn-primary" onclick="modifyMemory('${result.address}', this.previousElementSibling.value)">Modify</button>
+                        </td>
+                    </tr>
+                `).join('');
+            } else {
+                // Only update values in existing rows
+                results.forEach(result => {
+                    const row = tbody.querySelector(`tr[data-address="${result.address}"]`);
+                    if (row) {
+                        const valueCell = row.querySelector('.value-cell');
+                        if (valueCell) {
+                            valueCell.textContent = result.value;
+                        }
+                    }
+                });
+            }
+        }
+
+        // Modify memory value
+        async function modifyMemory(address, newValue) {
+            try {
+                const pid = parseInt(document.getElementById('processSelect').value);
+                const dataType = document.getElementById('dataType').value;
+
+                if (!newValue) {
+                    alert('Please enter a new value');
+                    return;
+                }
+
+                const numValue = parseFloat(newValue);
+                if (isNaN(numValue)) {
+                    alert('Please enter a valid number');
+                    return;
+                }
+
+                const response = await fetch(`${API_BASE}/modify`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        pid: pid,
+                        address: address,
+                        value: numValue,
+                        dataType: dataType
+                    })
+                });
+
+                if (!response.ok) {
+                    const error = await response.text();
+                    throw new Error(error);
+                }
+
+                const result = await response.json();
+                if (result.success) {
+                    alert('Value modified successfully!');
+                    updateResults(); // Refresh results
+                }
+            } catch (error) {
+                console.error('Modification failed:', error);
+                alert('Modification failed: ' + error.message);
+            }
+        }
+
+        // Update results
+        async function updateResults() {
+            if (lastResults.length > 0) {
+                const pid = parseInt(document.getElementById('processSelect').value);
+                const dataType = document.getElementById('dataType').value;
+
+                try {
+                    const response = await fetch(`${API_BASE}/search`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                            pid: pid,
+                            value: 0, // Value doesn't matter for value updates
+                            dataType: dataType,
+                            operation: 'equal',
+                            previousResults: lastResults
+                        })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+
+                    const results = await response.json();
+                    displayResults(results, true); // Only update values
+                } catch (error) {
+                    console.error('Failed to update values:', error);
+                    toggleAutoUpdate(false);
+                }
+            }
+        }
+
+        // Auto update control
+        function toggleAutoUpdate(enabled) {
+            const autoUpdateSwitch = document.getElementById('autoUpdateSwitch');
+            if (enabled) {
+                if (lastResults.length > 0) {
+                    autoUpdateTimer = setInterval(updateResults, 1000); // Update every second
+                } else {
+                    autoUpdateSwitch.checked = false;
+                    alert('Please perform a search first');
+                }
+            } else {
+                if (autoUpdateTimer) {
+                    clearInterval(autoUpdateTimer);
+                    autoUpdateTimer = null;
+                }
+                if (autoUpdateSwitch.checked) {
+                    autoUpdateSwitch.checked = false;
+                }
+            }
+        }
+
+        // Event listeners
+        document.getElementById('refreshProcesses').onclick = getProcesses;
+        document.getElementById('searchBtn').onclick = () => searchMemory(false);
+        document.getElementById('rescanBtn').onclick = () => searchMemory(true);
+        document.getElementById('autoUpdateSwitch').onchange = (e) => toggleAutoUpdate(e.target.checked);
+
+        // Initialize
+        getProcesses();
+    </script>
+</body>
+</html> 
